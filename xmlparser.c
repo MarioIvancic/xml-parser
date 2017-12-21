@@ -1,14 +1,61 @@
+/*  Copyright (c) 2013, Mario Ivancic
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+    WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+    ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+    (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+    LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+    ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
 // xmlparser.c
 
 #include <stdint.h>
-#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+//#include <stdio.h>
 #include "xmlparser.h"
 
-#define XML_ERROR(code, string) do { \
-        p->tag = (string); \
-        p->pool_size = (code); \
-        p->error_handler(p); \
-    } while(0)
+void log_debug(const char* format, ...);
+
+#define XML_ERROR(code, string) xml_set_error(p, (code), (string))
+
+// macro to update pointers and return
+#define RETURN(n) do { p->pool = pool; p->pool_size = pool_size; return (n); } while(0)
+
+
+/*
+    Allowed characters:
+    S               [ \r\n\t]
+    NameStartChar   [:_A-Za-z]
+    NameChar        NameStartChar | [0-9.-]
+    Name            NameStartChar NameChar*
+    EntityRef       & Name ;
+    CharRef         &# [0-9]+ ; | &#x [0-9a-fA-F]+ ;
+    Reference       EntityRef | CharRef
+    AttValue        " ([^<&"] | Reference)* " | ' ([^<&'] | Reference)* '
+    AttName         Name
+    Attribute       AttName Eq AttValue
+    STag            < Name (S Attribute)* S? >
+    ETag            </ Name S? >
+    EmptyElemTag    < Name (S Attribute)* S? />
+
+    Note: built-in EntityRef:  amp, lt, gt, apos, quot
+*/
 
 // constants for xml_parser_t::state
 enum
@@ -25,11 +72,23 @@ enum
 };
 
 
+
+// get next char from string
+// ignore '\r' in "\r\n", else convert '\r' to '\n'
 static int get_xml_char(xml_parser_t* p)
 {
     int i = *(p->src);
-    if(!i) return -1;
     p->src++;
+
+    if(i == '\r')
+    {
+        i = *(p->src);
+        if(i == '\n') p->src++;
+        else if(!i) i = -1;
+        else i = '\n';
+    }
+    else if(!i) i = -1;
+
     return i;
 }
 
@@ -62,18 +121,18 @@ static int xml_parse_testlt(xml_parser_t* p)
         else if(c == -1)
         {
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-            return 1;
+            return (1);
         }
         else
         {
             XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-            return 1;
+            return (1);
         }
     }
     else if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        return (1);
     }
     else
     {
@@ -83,17 +142,20 @@ static int xml_parse_testlt(xml_parser_t* p)
         p->pool_size--;
     }
 
-    return 0;
+    return (0);
 }
 
 
 // after '<![' we have to extract CDATA block ending with ']]>'
 static int xml_parse_cdata(xml_parser_t* p)
 {
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
+
     // we get here after '<![' so we have to test next few chars
     // and than wait for ']]>'
-    const char cdata_start[] = "CDATA[";
-    const char cdata_end[] = "]]>";
+    static const char cdata_start[] = "CDATA[";
+    static const char cdata_end[] = "]]>";
     int i, c;
 
     for(i = 0; i < 6; i++)
@@ -102,30 +164,30 @@ static int xml_parse_cdata(xml_parser_t* p)
         if(c != cdata_start[i])
         {
             XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-            return 1;
+            RETURN(1);
         }
         if(c == -1)
         {
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-            return 1;
+            RETURN(1);
         }
     }
 
     // we are now in CDATA block which must end with ']]>'
     i = 0;
-    p->cdata = p->pool;
+    p->cdata = pool;
 
     while(1)
     {
         c = p->get_char(p);
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
 
         if(c == cdata_end[i])
         {
@@ -134,10 +196,10 @@ static int xml_parse_cdata(xml_parser_t* p)
             {
                 p->state = STATE_CHARS;
                 // we have to trim ']]>' from the end of pool
-                p->pool[-3] = 0;
+                pool[-3] = 0;
 
                 // call cdata handler
-                p->cdata_handler(p);
+                if(p->cdata_handler) p->cdata_handler(p);
 
                 // reset pool memory
                 p->pool = p->_pool;
@@ -145,7 +207,7 @@ static int xml_parse_cdata(xml_parser_t* p)
 
                 p->chars = p->_pool;
 
-                return 0;
+                return (0);
             }
         }
         else
@@ -154,12 +216,12 @@ static int xml_parse_cdata(xml_parser_t* p)
             if(c == -1)
             {
                 XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-                return 1;
+                RETURN(1);
             }
         }
     }
 
-    return 0;
+    RETURN(0);
 }
 
 
@@ -168,6 +230,11 @@ static int xml_parse_cdata(xml_parser_t* p)
 static int xml_parse_attributes(xml_parser_t* p)
 {
     int c, quote_char;
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
+    char* ref;
+
+// log_debug("SRC: '%s'", p->src);
 
     c = p->get_char(p);
 
@@ -175,79 +242,134 @@ parse_name:
 
     while(c != -1 && c != '=')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
 
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
+
+//*pool = 0; log_debug("AttName: '%s'", p->attr);
 
     // c is now '=' so we have to test next char to see is it ' or "
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
-    *p->pool++ = c;
-    p->pool_size--;
+    *pool++ = c;
+    pool_size--;
 
     c = p->get_char(p);
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
-    *p->pool++ = c;
-    p->pool_size--;
+    *pool++ = c;
+    pool_size--;
 
     if(c == '"' || c == '\'') quote_char = c;
     else
     {
         XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-        return 1;
+        RETURN(1);
     }
 
     // now we have to parse value
     c = p->get_char(p);
+    ref = 0;
     while(c != -1 && c != quote_char)
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
+
+        // test for reference (&#\d+; &#x\h+; &amp; &lt; &gt; &apos; &quot;)
+        if(!ref && c == '&')
+        {
+            ref = pool;
+//log_debug("RefStart, ref=%p, pool=%p, pool_size=%d", ref, pool, pool_size);
+        }
+        else if(ref && c == ';')
+        {
+            long t = -1;
+
+            *pool = 0;          // terminatin char for reference
+
+//log_debug("RefEnd, ref=%s, pool=%p, pool_size=%d", ref, pool, pool_size);
+
+            // ref now points to reference after '&' character
+            // and ends with ';' character
+            if(ref[0] == '#')   // CharRef
+            {
+                if(ref[1] == 'x')   // hexadecimal CharRef
+                {
+                    t = strtol(ref + 2, 0, 16);
+                }
+                else                // decimal CharRef
+                {
+                    t = strtol(ref + 1, 0, 10);
+                }
+            }
+            else if(ref[0] == 'a')
+            {
+                if(ref[1] == 'm' && ref[2] == 'p') t = '&';
+                else if(ref[1] == 'p' && ref[2] == 'o' && ref[3] == 's') t = '\'';
+            }
+            else if(ref[0] == 'l' && ref[1] == 't') t = '<';
+            else if(ref[0] == 'g' && ref[1] == 't') t = '>';
+            else if(ref[0] == 'q' && ref[1] == 'u' && ref[2] == 'o' && ref[3] == 't') t = '"';
+
+            if(t == -1)
+            {
+                XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
+                RETURN(1);
+            }
+            else
+            {
+                ref[-1] = t;
+                pool_size += (int)(pool - ref);
+                pool = ref;
+            }
+
+            ref = 0;
+        }
+
         c = p->get_char(p);
     }
 
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
 
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
-    *p->pool++ = c;
-    p->pool_size--;
+    *pool++ = c;
+    pool_size--;
 
     // now we have to find new attribute name or end of tag
     c = p->get_char(p);
@@ -255,63 +377,63 @@ parse_name:
     // skip all whitespace chars
     while(c == ' ')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
 
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
 
     // we have to test c to see is it end of tag or new attribute name
     if(c == '/')
     {
-        *p->pool = 0;       // terminating char
+        *pool = 0;       // terminating char
         // trim trailing space chars
-        p->pool--;
-        while(*p->pool == ' ') *p->pool-- = 0;
+        pool--;
+        while(*pool == ' ') *pool-- = 0;
 
         // next char should be '>'
         c = p->get_char(p);
         if(c == -1)
         {
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-            return 1;
+            RETURN(1);
         }
 
         if(c != '>')
         {
             XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-            return 1;
+            RETURN(1);
         }
 
         p->level++;
         // call start_element_handler
-        p->start_element_handler(p);
+        if(p->start_element_handler) p->start_element_handler(p);
 
         p->level--;
         // call end_element_handler
-        p->end_element_handler(p);
+        if(p->end_element_handler) p->end_element_handler(p);
     }
     else if(c == '>')
     {
-        *p->pool = 0;       // terminating char
+        *pool = 0;       // terminating char
         // trim trailing space chars
-        p->pool--;
-        while(*p->pool == ' ') *p->pool-- = 0;
+        pool--;
+        while(*pool == ' ') *pool-- = 0;
 
         p->level++;
         // call start_element_handler
-        p->start_element_handler(p);
+        if(p->start_element_handler) p->start_element_handler(p);
     }
     else
     {
@@ -326,7 +448,7 @@ parse_name:
     p->state = STATE_CHARS;
     p->chars = p->_pool;
 
-    return 0;
+    return (0);
 }
 
 
@@ -334,6 +456,9 @@ parse_name:
 
 static int xml_parse_comment(xml_parser_t* p)
 {
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
+
     // we get here after '<!-' so we have to test next char
     // and than wait for '-->'
 
@@ -346,19 +471,19 @@ static int xml_parse_comment(xml_parser_t* p)
 
         // we are now in comment block which must end with '-->'
         i = 0;
-        p->comment = p->pool;
+        p->comment = pool;
 
         while(1)
         {
             c = p->get_char(p);
-            if(!p->pool_size)
+            if(!pool_size)
             {
                 XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-                return 1;
+                RETURN(1);
             }
 
-            *p->pool++ = c;
-            p->pool_size--;
+            *pool++ = c;
+            pool_size--;
 
             if(c == comment_end[i])
             {
@@ -368,10 +493,10 @@ static int xml_parse_comment(xml_parser_t* p)
                     //p->state = STATE_START;
                     p->state = STATE_CHARS;
                     // we have to trim '-->' from the end of pool
-                    p->pool[-3] = 0;
+                    pool[-3] = 0;
 
                     // call comment handler
-                    p->comment_handler(p);
+                    if(p->comment_handler) p->comment_handler(p);
 
                     // reset pool memory
                     p->pool = p->_pool;
@@ -379,7 +504,7 @@ static int xml_parse_comment(xml_parser_t* p)
 
                     p->chars = p->_pool;
 
-                    return 0;
+                    return (0);
                 }
             }
             else
@@ -388,7 +513,7 @@ static int xml_parse_comment(xml_parser_t* p)
                 if(c == -1)
                 {
                     XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-                    return 1;
+                    RETURN(1);
                 }
             }
         }
@@ -396,15 +521,15 @@ static int xml_parse_comment(xml_parser_t* p)
     else if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
     else
     {
         XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-        return 1;
+        RETURN(1);
     }
 
-    return 0;
+    RETURN(0);
 }
 
 
@@ -413,25 +538,27 @@ static int xml_parse_comment(xml_parser_t* p)
 static int xml_parse_pi(xml_parser_t* p)
 {
     int c;
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
 
     c = p->get_char(p);
     while(c != -1 && c != '?')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
 
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
 
     // now we know it's '?', next char should be '>'
@@ -439,33 +566,34 @@ static int xml_parse_pi(xml_parser_t* p)
 
     if(c == '>')
     {
-        *p->pool = 0;
+        *pool = 0;
         // trim trailing space chars
-        p->pool--;
-        while(*p->pool == ' ') *p->pool-- = 0;
+        pool--;
+        while(*pool == ' ') *pool-- = 0;
 
 
         // call PI callback
-        p->pi_handler(p);
+        if(p->pi_handler) p->pi_handler(p);
 
         // reset memory pool
         p->pool = p->_pool;
         p->pool_size = p->_pool_size;
         p->state = STATE_CHARS;
         p->chars = p->_pool;
+        return 0;
     }
     else if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
     else
     {
         XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-        return 1;
+        RETURN(1);
     }
 
-    return 0;
+    RETURN(0);
 }
 
 
@@ -496,17 +624,20 @@ static int xml_parse_start(xml_parser_t* p)
 
 static int xml_parse_tagend(xml_parser_t* p)
 {
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
     int c = p->get_char(p);
+
     while(c != -1 && c != '>')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
 
@@ -514,22 +645,22 @@ static int xml_parse_tagend(xml_parser_t* p)
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
 
     // now we know c == '>'
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
     p->attr = 0;        // no attributes
-    *p->pool = 0;       // terminating char
+    *pool = 0;       // terminating char
 
     p->level--;
     // call end_element_handler
-    p->end_element_handler(p);
+    if(p->end_element_handler) p->end_element_handler(p);
 
     p->state = STATE_CHARS;
     p->chars = p->_pool;
@@ -538,7 +669,7 @@ static int xml_parse_tagend(xml_parser_t* p)
     p->pool = p->_pool;
     p->pool_size = p->_pool_size;
 
-    return 0;
+    return (0);
 }
 
 
@@ -546,42 +677,48 @@ static int xml_parse_tagend(xml_parser_t* p)
 // get xml tag
 static int xml_parse_tag(xml_parser_t* p)
 {
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
     int c = p->get_char(p);
+
     while(c != -1 && c != ' ' && c != '>' && c != '/')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
+
+    // skip all whitespace chars
+    while(c == ' ') c = p->get_char(p);
 
     // end of stream or end of tag name
     if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return 1;
+        RETURN(1);
     }
 
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
     if(c == '>' || c == '/')
     {
         // it's a tag without attributes
-        p->attr = 0;        // no attributes
-        *p->pool = 0;       // terminating char
+        p->attr = pool;     // no attributes, so p->attr points to null string
+        *pool = 0;          // terminating char
 
         p->level++;
         // call start_element_handler
-        p->start_element_handler(p);
+        if(p->start_element_handler) p->start_element_handler(p);
 
         if(c == '/')
         {
@@ -590,35 +727,35 @@ static int xml_parse_tag(xml_parser_t* p)
             if(c == -1)
             {
                 XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-                return 1;
+                RETURN(1);
             }
 
             if(c != '>')
             {
                 XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-                return 1;
+                RETURN(1);
             }
 
             p->level--;
             // call end_element_handler
-            p->end_element_handler(p);
+            if(p->end_element_handler) p->end_element_handler(p);
         }
 
         p->state = STATE_CHARS;
         p->chars = p->_pool;
 
         // reset pool memory
-        p->pool = p->_pool;
-        p->pool_size = p->_pool_size;
+        pool = p->_pool;
+        pool_size = p->_pool_size;
     }
     else
     {
         // it's a tag with attributes
-        *p->pool++ = 0;     // terminating char
-        p->pool_size--;
+        *pool++ = 0;     // terminating char
+        pool_size--;
 
         // save attributes string
-        p->attr = p->pool;
+        p->attr = pool;
 
         // skip all whitespace chars
         while(c == ' ') c = p->get_char(p);
@@ -626,39 +763,42 @@ static int xml_parse_tag(xml_parser_t* p)
         if(c == -1)
         {
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-            return 1;
+            RETURN(1);
         }
 
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
 
         p->state = STATE_ATTR;
     }
 
-    return 0;
+    RETURN(0);
 }
 
 
 
 static int xml_parse_chars(xml_parser_t* p)
 {
+    char* pool = p->pool;
+    int pool_size = p->pool_size;
     int c = p->get_char(p);
+
     while(c != -1 && c != '<')
     {
-        if(!p->pool_size)
+        if(!pool_size)
         {
             XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-            return 1;
+            RETURN(1);
         }
 
-        *p->pool++ = c;
-        p->pool_size--;
+        *pool++ = c;
+        pool_size--;
         c = p->get_char(p);
     }
 
@@ -669,20 +809,20 @@ static int xml_parse_chars(xml_parser_t* p)
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
         }
 
-        return 1;
+        RETURN(1);
     }
 
     // end of chars
-    if(!p->pool_size)
+    if(!pool_size)
     {
         XML_ERROR(XML_ERROR_NO_MEMORY, "No enough memory in pool");
-        return 1;
+        RETURN(1);
     }
 
-    *p->pool++ = 0;     // terminating char
+    *pool++ = 0;     // terminating char
 
     // call characters_handler
-    p->characters_handler(p);
+    if(p->characters_handler) p->characters_handler(p);
 
     // reset memory pool
     p->pool = p->_pool;
@@ -690,7 +830,7 @@ static int xml_parse_chars(xml_parser_t* p)
 
     p->state = STATE_TESTLT;
 
-    return 0;
+    RETURN(0);
 }
 
 
@@ -802,4 +942,62 @@ void xml_reset(xml_parser_t* p)
     p->state = 0;
     p->level = 0;
     p->get_char = 0;
+}
+
+
+// helper function for finding attribute attr_name
+// returns value len and pointer to value in attr_val
+// return -1 if not found
+int xml_find_attr(const char* attr_string, const char* attr_name, char** attr_val)
+{
+    char* ptr = (char*)attr_string;
+
+    while(1)
+    {
+        ptr = strstr(ptr, attr_name);
+        if(!ptr) return -1;
+        ptr += strlen(attr_name);
+        if(*ptr == '=')
+        {
+            ++ptr;
+            break;
+        }
+    }
+    if(*ptr == '"')
+    {
+        *attr_val = ++ptr;
+
+        while(1)
+        {
+            ptr = strchr(ptr, '"');
+            if(!ptr) return -1;
+            if(ptr[-1] == '\\') ++ptr;
+            else break;
+        }
+        return (int)(ptr - *attr_val);
+    }
+    else if(*ptr == '\'')
+    {
+        *attr_val = ++ptr;
+
+        while(1)
+        {
+            ptr = strchr(ptr, '\'');
+            if(!ptr) return -1;
+            if(ptr[-1] == '\\') ++ptr;
+            else break;
+        }
+        return (int)(ptr - *attr_val);
+    }
+
+    return -1;
+}
+
+
+
+void xml_set_error(xml_parser_t* p, int err_code, const char* err_string)
+{
+    p->tag = (char*)err_string;
+    p->errorcode = err_code;
+    if(p->error_handler) p->error_handler(p);
 }
