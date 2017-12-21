@@ -27,11 +27,6 @@
 #ifndef __XMLPARSER_H__
 #define __XMLPARSER_H__
 
-// TODO: napraviti copmile time opciju da se umjesto niza pointera na
-// handler funkcije koristi samo jedan pointer za jednu handler funkciju
-// drugu opciju da se umjesto niza pointera na handler funkcije koristi
-// niz handler funkcija sa predefinisanim imenom koje bi bile implementirane
-// u klijentskom kodu
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,10 +86,11 @@ enum
 enum
 {
     XML_ERROR_NONE = 0,
-    XML_ERROR_DOCUMENT_END,
-    XML_ERROR_NO_MEMORY,
-    XML_ERROR_MALFORMED,
-    XML_ERROR_USERSTART,
+    XML_ERROR_ARG,          // 1
+    XML_ERROR_DOCUMENT_END, // 2
+    XML_ERROR_NO_MEMORY,    // 3
+    XML_ERROR_MALFORMED,    // 4
+    XML_ERROR_USERSTART,    // 5
 };
 
 
@@ -110,7 +106,7 @@ void xml_reset(xml_parser_t* p);
 // helper function for finding attribute in attribute string
 int xml_find_attr(const char* attr_string, const char* attr_name, char** attr_val);
 
-// helper function for setting error code from user code
+// helper function for setting error string from user code
 void xml_set_error(xml_parser_t* p, int err_code, const char* err_string);
 
 #ifdef __cplusplus

@@ -74,7 +74,7 @@ enum
 
 
 // get next char from string
-// ignore '\r' in "\r\n", else convert '\r' to '\n'
+// all kinds of line endings converted to '\n' ('\r' ignored in "\r\n", converted to '\n' in "\r")
 static int get_xml_char(xml_parser_t* p)
 {
     int i = *(p->src);
@@ -96,6 +96,7 @@ static int get_xml_char(xml_parser_t* p)
 // generic parser
 
 // after '<' we have to test next char
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_testlt(xml_parser_t* p)
 {
     // get next char
@@ -121,18 +122,18 @@ static int xml_parse_testlt(xml_parser_t* p)
         else if(c == -1)
         {
             XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-            return (1);
+            return 1;
         }
         else
         {
             XML_ERROR(XML_ERROR_MALFORMED, "Malformed xml document");
-            return (1);
+            return 1;
         }
     }
     else if(c == -1)
     {
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
-        return (1);
+        return 1;
     }
     else
     {
@@ -142,11 +143,12 @@ static int xml_parse_testlt(xml_parser_t* p)
         p->pool_size--;
     }
 
-    return (0);
+    return 0;
 }
 
 
 // after '<![' we have to extract CDATA block ending with ']]>'
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_cdata(xml_parser_t* p)
 {
     char* pool = p->pool;
@@ -207,7 +209,7 @@ static int xml_parse_cdata(xml_parser_t* p)
 
                 p->chars = p->_pool;
 
-                return (0);
+                return 0;
             }
         }
         else
@@ -227,14 +229,13 @@ static int xml_parse_cdata(xml_parser_t* p)
 
 
 // after first char of attributes we have to parse rest of the chars
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_attributes(xml_parser_t* p)
 {
     int c, quote_char;
     char* pool = p->pool;
     int pool_size = p->pool_size;
     char* ref;
-
-// log_debug("SRC: '%s'", p->src);
 
     c = p->get_char(p);
 
@@ -258,8 +259,6 @@ parse_name:
         XML_ERROR(XML_ERROR_DOCUMENT_END, "Premature end of xml document");
         RETURN(1);
     }
-
-//*pool = 0; log_debug("AttName: '%s'", p->attr);
 
     // c is now '=' so we have to test next char to see is it ' or "
     if(!pool_size)
@@ -306,15 +305,12 @@ parse_name:
         if(!ref && c == '&')
         {
             ref = pool;
-//log_debug("RefStart, ref=%p, pool=%p, pool_size=%d", ref, pool, pool_size);
         }
         else if(ref && c == ';')
         {
             long t = -1;
 
             *pool = 0;          // terminatin char for reference
-
-//log_debug("RefEnd, ref=%s, pool=%p, pool_size=%d", ref, pool, pool_size);
 
             // ref now points to reference after '&' character
             // and ends with ';' character
@@ -448,12 +444,12 @@ parse_name:
     p->state = STATE_CHARS;
     p->chars = p->_pool;
 
-    return (0);
+    return 0;
 }
 
 
 
-
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_comment(xml_parser_t* p)
 {
     char* pool = p->pool;
@@ -504,7 +500,7 @@ static int xml_parse_comment(xml_parser_t* p)
 
                     p->chars = p->_pool;
 
-                    return (0);
+                    return 0;
                 }
             }
             else
@@ -534,7 +530,8 @@ static int xml_parse_comment(xml_parser_t* p)
 
 
 
-
+// parse processing instructions <?...?>
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_pi(xml_parser_t* p)
 {
     int c;
@@ -599,6 +596,7 @@ static int xml_parse_pi(xml_parser_t* p)
 
 
 // find start of tag
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_start(xml_parser_t* p)
 {
     int c;
@@ -622,6 +620,7 @@ static int xml_parse_start(xml_parser_t* p)
 
 
 
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_tagend(xml_parser_t* p)
 {
     char* pool = p->pool;
@@ -669,12 +668,13 @@ static int xml_parse_tagend(xml_parser_t* p)
     p->pool = p->_pool;
     p->pool_size = p->_pool_size;
 
-    return (0);
+    return 0;
 }
 
 
 
 // get xml tag
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_tag(xml_parser_t* p)
 {
     char* pool = p->pool;
@@ -783,6 +783,7 @@ static int xml_parse_tag(xml_parser_t* p)
 
 
 
+// returns 1 if we need to stop parsing, 0 otherwise
 static int xml_parse_chars(xml_parser_t* p)
 {
     char* pool = p->pool;
@@ -870,7 +871,7 @@ void xml_parse_string(xml_parser_t* p, char* string)
 
 int xml_set_handler(xml_parser_t *p, void *handler, int handler_type)
 {
-    int i = 0;
+    int i = XML_ERROR_NONE;
 
     switch(handler_type)
     {
@@ -902,7 +903,7 @@ int xml_set_handler(xml_parser_t *p, void *handler, int handler_type)
             p->cdata_handler = handler;
         break;
 
-        default: i = -1;
+        default: i = XML_ERROR_ARG;
     }
 
     return i;
